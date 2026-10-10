@@ -1,43 +1,92 @@
 import * as THREE from 'three';
-import { FRAGMENT_LINES } from './personal.js';
+import { FRAGMENT_LINES, FINAL_MESSAGE, SIGNATURE } from './personal.js';
 import { saveState } from './state.js';
+import { PLATFORMS, floorAt } from './world.js';
+import { DAYS, QUESTIONS, SHIP_GOAL } from './days.js';
 
-// Story for Phase 1: the crash night and Day 1.
-// Every scene is an async function, so it reads top to bottom like a script.
+// The story engine. The prologue is scripted here; every day after that
+// runs through the same rhythm, with its content coming from days.js.
 
-let G, UI, W, S;
-const K = 'Kristi', B = 'Kirubel', SE = 'Sena', L = 'Lumi';
+let G, UI, W, S, D = null;
+const K = 'Kristi', B = 'Kirubel', SE = 'Sena', L = 'Lumi', EL = 'Elder Thorne';
+const SLOTS = 3, CALM_GOAL = 10, STEADY_GOAL = 6, PRAYERS_TO_KNEEL = 6;
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
 const say = (n, t, o) => UI.say(n, t, o);
 const narrate = (t, ms) => UI.narrate(t, ms);
 const at = (p, dx, dy, dz) => V(p.x + dx, G.groundAt(p.x + dx, p.z + dz) + dy, p.z + dz);
-
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 // camera beside two characters so both faces are visible (picks the side away from the wreck)
 function twoShot(b = W.kirubel.group.position, speed = 1.4, dist = 3.4) {
   const a = G.P.pos, mx = (a.x + b.x) / 2, mz = (a.z + b.z) / 2;
-  let dx = b.x - a.x, dz = b.z - a.z; const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+  let dx = b.x - a.x, dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1; dx /= len; dz /= len;
   const c1 = [mx - dz * dist, mz + dx * dist], c2 = [mx + dz * dist, mz - dx * dist];
   const far = (c) => Math.hypot(c[0] - G.SPOTS.crash.x, c[1] - G.SPOTS.crash.z);
-  const c = far(c1) > far(c2) ? c1 : c2, y = Math.max(a.y, b.y);
+  const c = far(c1) > far(c2) ? c1 : c2, y = Math.max(a.y, Math.min(b.y, a.y + 1.5));
   G.shot(V(c[0], Math.max(y, G.groundAt(c[0], c[1])) + 1.5, c[1]), V(mx, y + 1.05, mz), speed);
 }
 
-export async function runFrom(g, cp) {
-  G = g; UI = g.UI; W = g.W; S = g.state;
-  W.setMoonDay(S.day);
-  applyFlags();
-  if (cp === 'prologue') { await prologue(); cp = 'day1_morning'; }
-  if (cp === 'day1_morning') { await day1Morning(); cp = 'day1_day'; }
-  if (cp === 'day1_day') { await day1Day(); await day1Evening(); cp = 'day1_end'; }
-  if (cp === 'day1_end') await endOfDay1();
+// the object every scene in days.js receives
+function ctx(extra = {}) {
+  return Object.assign({
+    get S() { return S; }, get D() { return D; }, G, W, UI, A: G.A, SPOTS: G.SPOTS,
+    V: (x, z) => new THREE.Vector3(x, 0, z), at, twoShot, say, narrate, choose: (o) => UI.choose(o),
+    calmTest, addTask: (t) => startTask(t), done: (id) => !!(D && D.done[id]),
+    get over() { return !!(D && D.over); }, get partsFound() { return D ? D.partsFound : 0; },
+  }, extra);
 }
 
-function applyFlags() {
+// a moment that tests her patience: the second option is the calm one
+async function calmTest(options, onBad, onGood, what) {
+  const c = await UI.choose(options);
+  if (c === 0) { S.calm -= 1; if (D) (D.reflect.calmDown = D.reflect.calmDown || []).push(what); if (onBad) await onBad(); return false; }
+  S.calm += 1; if (D) (D.reflect.calmUp = D.reflect.calmUp || []).push(what); if (onGood) await onGood(); return true;
+}
+
+// ════════════════════ ENTRY ════════════════════
+export async function runFrom(g, cp) {
+  G = g; UI = g.UI; W = g.W; S = g.state;
+  Object.assign(S, { joined: S.joined || 0, ship: S.ship || 0, trust: S.trust || 0, miraKind: S.miraKind || 0, questions: S.questions || [], snaps: S.snaps || {} });
+  cp = ({ day1_morning: 'd1_morning', day1_day: 'd1_day', day1_end: 'd2_morning' })[cp] || cp; // saves from Phase 1
+  applyWorld();
+  if (cp === 'prologue') { await prologue(); cp = 'd1_morning'; }
+  for (;;) {
+    const m = /^d(\d+)_(morning|day)$/.exec(cp);
+    if (m) {
+      const n = +m[1];
+      if (m[2] === 'morning') await morning(n);
+      await dayPhase(n);
+      if (n === 10) { cp = 'finale'; continue; }
+      await evening(n);
+      await nightPrayer(n);
+      const r = await summary(n);
+      if (r === 'replay') return replayFrom(n);
+      cp = `d${n + 1}_morning`; continue;
+    }
+    if (cp === 'finale') { await finale(); cp = 'ending'; continue; }
+    if (cp === 'ending') { await endingCard(); return; }
+    return;
+  }
+}
+
+function applyWorld() {
+  W.setMoonDay(S.day || 0);
   if (S.flags.healed) healSapling(true);
   if (S.flags.lanterns) W.posts.forEach(p => p.userData.lit());
   if (S.flags.goldStar) W.kirubel.goldStar.visible = true;
+  if (S.flags.bonfire) W.setBonfire(S.flags.bonfire);
+  W.setRepair(S.ship / SHIP_GOAL);
 }
+
+function healSapling(instant) {
+  const s = W.sapling, mat = s.userData.leafMat, to = new THREE.Color(0x4fa04a);
+  if (instant) { mat.color.copy(to); s.userData.leaf.scale.set(1.35, 0.85, 1.35); return; }
+  let t = 0; const from = mat.color.clone();
+  const step = () => { t += 0.02; mat.color.copy(from).lerp(to, Math.min(1, t)); const sc = 1 + 0.35 * Math.min(1, t); s.userData.leaf.scale.set(sc, 0.6 + 0.25 * Math.min(1, t), sc); if (t < 1) requestAnimationFrame(step); };
+  step();
+}
+
+function hideNPCs() { W.elder.group.visible = false; W.mira.group.visible = false; W.villagers.forEach(v => v.group.visible = false); W.sena.at(G.SPOTS.sena.x, G.SPOTS.sena.z); }
 
 // ════════════════════ PROLOGUE: THE NIGHT IT FELL ════════════════════
 async function prologue() {
@@ -164,91 +213,80 @@ async function prologue() {
   S.day = 1; W.setMoonDay(1);
 }
 
-// ════════════════════ DAY 1: MORNING PRAYER ════════════════════
-async function day1Morning() {
-  G.freeze(true);
-  S.day = 1; W.setMoonDay(1);
-  if (!S.snapshot) { const copy = JSON.parse(JSON.stringify(S)); copy.checkpoint = 'day1_morning'; S.snapshot = copy; }
-  S.checkpoint = 'day1_morning'; G.save();
-  W.wreck.visible = true; W.setSmoke(0.6);
-  W.kirubel.group.visible = true; W.lumi.group.visible = true;
+
+
+// ════════════════════ MORNING ════════════════════
+const MORNING_OPTS = ['Wait quietly beside him', 'Slip away and start the day early', 'Kneel and pray with him'];
+const NIGHT_OPTS = ['Sit beside him until he’s done', 'Go home and get some sleep', 'Kneel and pray with him'];
+const canKneel = (n) => n >= 4 && S.waited >= 4;
+
+async function prayerChoice(n, opts) {
+  const list = canKneel(n) ? [opts[0], opts[1], opts[2]] : [opts[0], opts[1]];
+  const c = await UI.choose(list);
   const pp = G.SPOTS.prayer;
-  G.place(W.kirubel, pp.x, pp.z, pp.x + 10, pp.z);
-  W.kirubel.setPose('pray');
+  if (c === 0) { S.calm += 1; S.waited += 1; S.restless -= 2; }
+  else if (c === 1) { S.restless -= 1; }
+  else { S.calm += 2; S.waited += 1; S.joined += 1; S.restless -= 3; S.bond += 1; }
+  if (c !== 1) G.placePlayer(pp.x - 1.1, pp.z + 1.3, Math.PI / 2);
+  S.restless = clamp(S.restless, 0, 10);
+  return c;
+}
+
+async function morning(n) {
+  const day = DAYS[n];
+  G.freeze(true); S.day = n; W.setMoonDay(n);
+  const snap = JSON.parse(JSON.stringify(S)); delete snap.snaps; snap.checkpoint = `d${n}_morning`; S.snaps[n] = snap;
+  if (n > 1) S.restless = clamp(S.restless + 3, 0, 10); // the moon is coming; he gets more anxious every day
+  S.checkpoint = `d${n}_morning`; G.save();
+  W.setStorm(0); W.wreck.visible = true; W.kirubel.group.visible = true; W.lumi.group.visible = true; hideNPCs();
+  if (S.flags.bonfire) { S.flags.bonfire = 1; W.setBonfire(1); } // last night's fire has burned down
+  G.P.energyMax = 100; G.P.drain = 1; G.P.energy = 100;
+  const pp = G.SPOTS.prayer;
+  G.place(W.kirubel, pp.x, pp.z, pp.x + 10, pp.z); W.kirubel.setPose('pray');
   G.placePlayer(pp.x - 3.2, pp.z + 2.4); G.faceKristi(pp);
   W.setTime(0.245);
   G.shotNow(at(pp, -7, 2.2, -3.5), at(pp, 10, 3, 0));
   await UI.fade(false, 1200);
-  await UI.dayCard('Day 1', 'The full moon rises in ten days.');
-
+  await UI.dayCard(day.title, day.sub);
   G.A.startPrayerMusic();
-  await narrate('Kristi wakes to find him already standing, facing the sunrise.', 3400);
+  if (day.intro) await narrate(day.intro, 3400);
   G.shot(at(pp, 4.5, 1.9, 3.5), at(pp, 0, 1.3, 0), 0.6);
-  await UI.prayerLine('በስመ አብ ወወልድ ወመንፈስ ቅዱስ', 'In the name of the Father, the Son and the Holy Spirit.', 5200);
-  await UI.prayerLine('እግዚአብሔር ይመስገን', 'Egziabher yimesgen — God be praised.', 4800);
-  await UI.prayerLine('', 'For this morning. For this forest. And for the one who wasn’t afraid.', 5200);
-
-  const ch = await UI.choose(['Wait quietly beside him', 'Slip away and start the day early']);
-  if (ch === 0) {
-    S.calm += 1; S.waited += 1; S.restless -= 2; S.flags.leftEarly = false;
-    G.placePlayer(pp.x - 1.1, pp.z + 1.3, Math.PI / 2); W.kristi.group.rotation.y = Math.PI / 2;
+  for (const [ge, en] of day.morning) await UI.prayerLine(ge, typeof en === 'function' ? en(ctx()) : en, ge ? 5000 : 4600);
+  const c = await prayerChoice(n, MORNING_OPTS);
+  S.flags.leftEarly = c === 1;
+  if (c === 0) {
     G.shot(at(pp, -6, 2, 2), at(pp, 2, 1.4, 0), 0.5);
-    await narrate('She doesn’t know the words. She stays anyway.', 3400);
-    await narrate('The forest goes very quiet.', 2800);
-    G.A.stopPrayerMusic(); W.kirubel.setPose('stand');
-    W.kirubel.group.rotation.y = Math.atan2(-1.1, 1.3);
-    twoShot();
-    await say(B, 'You stayed.');
-    await say(K, 'You looked… peaceful. I’ve never seen you peaceful.');
-    await say(B, 'You’ve known me for one night.');
-    await say(K, 'Exactly. And that’s the first time.');
+    await narrate(S.waited <= 1 ? 'She doesn’t know the words. She stays anyway.' : 'She stays beside him, quiet, while the sun comes up.', 3400);
+  } else if (c === 2) {
+    G.shot(at(pp, -6, 2, 2), at(pp, 2, 1.4, 0), 0.5);
+    await narrate(S.joined <= 1 ? 'She kneels beside him. She doesn’t know the words, so he whispers them slowly, for her.' : 'She kneels beside him. She knows some of the words now.', 3800);
   } else {
-    S.restless -= 1; S.flags.leftEarly = true;
     await narrate('She tiptoes away. There is so much to do.', 3000);
-    G.A.stopPrayerMusic();
-    await UI.fade(true, 700);
-    W.kirubel.setPose('stand');
-    G.placePlayer(pp.x - 4, pp.z + 3); G.faceKristi(pp);
-    W.kirubel.group.rotation.y = Math.atan2(-4, 3);
-    twoShot(undefined, 50);
-    await UI.fade(false, 700);
-    await say(B, 'You left early.');
-    await say(K, 'I had things to do!');
-    await say(B, 'Before the sun was even up?');
   }
-  await say(B, 'Every morning starts like this for me. Before anything else.');
-  await say(K, 'Before anything else? I have a hundred things to do today.');
-  await say(B, 'Then do one. Then the next one.');
-  await say(K, 'That is not how it works.');
-  await say(B, 'Where I come from, it’s the only way it works.');
-  await say(L, '*chirp chirp!*');
-  await say(B, 'This is Lumi. She came with me. Or I came with her — I’m never sure.');
-  await say(B, 'She keeps staring at that tall rock to the southwest. Something up there is glowing.');
-  await say(K, 'Fine. Let me plan my day.');
-  S.checkpoint = 'day1_day'; G.save();
+  G.A.stopPrayerMusic();
+  if (c === 1) { await UI.fade(true, 600); G.placePlayer(pp.x - 4, pp.z + 3); }
+  W.kirubel.setPose('stand');
+  const kb = W.kirubel.group.position;
+  W.kirubel.group.rotation.y = Math.atan2(G.P.pos.x - kb.x, G.P.pos.z - kb.z); G.faceKristi(kb);
+  twoShot(undefined, c === 1 ? 50 : 1.2);
+  if (c === 1) await UI.fade(false, 600);
+  await day.afterPrayer(ctx({ prayed: c !== 1, knelt: c === 2 }));
+  if (day.hint) { await say(L, '*chirp!*'); await say(B, day.hint); }
+  if (n === 2) await say(B, 'Oh — and the ship parts I can’t reach. If you see any glinting in the forest…');
+  S.checkpoint = `d${n}_day`; G.save();
 }
 
-// ════════════════════ DAY 1: THE DAY ════════════════════
-const TASKS = [
-  { id: 'parts', title: 'Look for ship parts', desc: 'Two pieces of his ship were thrown deep into the forest.' },
-  { id: 'heal', title: 'Heal the fading sapling', desc: 'A young Warka tree to the west is losing its colour. Grandmother Warka asked you to tend it.' },
-  { id: 'petals', title: 'Gather moonpetals', desc: 'The Elder needs five moonpetals for the Moon Festival.' },
-  { id: 'lanterns', title: 'Hang lanterns with Sena', desc: 'Sena needs help with the festival lanterns. (And she wants gossip.)' },
-];
-const SLOTS = 3;
-let D; // today's progress
+// ════════════════════ THE DAY ════════════════════
+const fragSpot = (id) => {
+  if (id === 'meadow') return V(G.SPOTS.meadow.x, 0, G.SPOTS.meadow.z + 1.9);
+  if (id === 'ring') return V(G.SPOTS.ring.x, 0, G.SPOTS.ring.z);
+  const p = PLATFORMS.find(q => q.id === id); return V(p.x, 0, p.z);
+};
 
-function healSapling(instant) {
-  const s = W.sapling, mat = s.userData.leafMat, to = new THREE.Color(0x4fa04a);
-  if (instant) { mat.color.copy(to); s.userData.leaf.scale.set(1.35, 0.85, 1.35); return; }
-  let t = 0; const from = mat.color.clone();
-  const step = () => { t += 0.02; mat.color.copy(from).lerp(to, Math.min(1, t)); const sc = 1 + 0.35 * Math.min(1, t); s.userData.leaf.scale.set(sc, 0.6 + 0.25 * Math.min(1, t), sc); if (t < 1) requestAnimationFrame(step); };
-  step();
-}
-
-async function day1Day() {
+async function dayPhase(n) {
+  const day = DAYS[n];
   G.freeze(true);
-  W.setTime(0.29); W.setSmoke(0.5);
+  W.setTime(0.29); W.setStorm(0);
   W.kirubel.group.visible = true; W.lumi.group.visible = true;
   const kp = G.SPOTS.kirubel;
   G.place(W.kirubel, kp.x, kp.z, G.SPOTS.crash.x, G.SPOTS.crash.z); W.kirubel.setPose('work');
@@ -256,122 +294,159 @@ async function day1Day() {
   G.shotNow(at(kp, -4, 2.4, 5), at(kp, 0, 1, 0));
   await UI.fade(false, 600);
 
-  const chosen = await UI.planner(TASKS, SLOTS);
-  D = { chosen, done: {}, parts: 0, petals: 0, lanterns: 0, gotLanterns: false, released: false, sunset: false, busy: false };
-  const over = chosen.length > SLOTS;
-  S.flags.over = over;
-  if (over) {
-    G.P.energyMax = 55; G.P.drain = 1.4; G.P.energy = 55;
-    await say(K, 'Four things. Easy. Probably.');
-  } else await say(K, chosen.length === 1 ? 'One thing. Done properly.' : 'Okay. One at a time.');
+  const offered = day.tasks.filter(t => !t.needsCore || (S.flags.coreStolen && !S.flags.core)).map(t => t.needsCore ? Object.assign({}, t, { required: true }) : t);
+  const chosen = await UI.planner(offered, SLOTS);
+  D = { n, chosen, tasks: [], done: {}, partsFound: 0, over: chosen.length > SLOTS, sunset: false, busy: false, reflect: {}, ids: new Set(), items: [], lines: {}, pend: {}, kirubelSteps: [], ended: false };
+  if (D.over) { G.P.energyMax = 55; G.P.drain = 1.4; G.P.energy = 55; await say(K, ['Four things. Easy. Probably.', 'I can do it all. I always can. …Mostly.', 'How hard can four things be?'][n % 3]); }
+  else await say(K, chosen.length === 1 ? 'One thing. Done properly.' : 'Okay. One thing, then the next.');
   W.kirubel.setPose('work');
 
-  // build today's tasks
-  const has = (id) => chosen.includes(id);
-  const live = [];
-  if (has('parts')) G.SPOTS.parts.forEach((p, i) => {
-    const item = W.makeItem('part', p); live.push({ task: 'parts', p, item, id: 'part' + i });
-    G.addInteract('part' + i, p, 'Pick up', { onUse: () => { G.removeInteract('part' + i); W.removeItem(item); G.A.chime(); D.parts++; tick(); UI.toast(`Ship part ${D.parts} of 2`); if (D.parts === 2) finish('parts'); } });
-  });
-  if (has('heal')) {
-    const sp = G.SPOTS.sapling; live.push({ task: 'heal', p: sp, id: 'sapling' });
-    G.addInteract('sapling', sp, 'Hold to heal', { hold: 5, radius: 3, onUse: (it) => {
-      healSapling(false); G.A.sparkle(); S.flags.healed = true;
-      if (!it.released) { S.calm += 1; UI.toast('She didn’t rush it. The little tree breathes again.'); }
-      else UI.toast('Healing can’t be rushed… but it’s done.');
-      finish('heal');
-    } });
-  }
-  if (has('petals')) for (let i = 0; i < 5; i++) {
-    const a = i / 5 * Math.PI * 2, p = V(G.SPOTS.petals.x + Math.cos(a) * 4.5, 0, G.SPOTS.petals.z + Math.sin(a) * 4.5);
-    const item = W.makeItem('petal', p); live.push({ task: 'petals', p, item, id: 'petal' + i });
-    G.addInteract('petal' + i, p, 'Pick', { radius: 2, onUse: () => { G.removeInteract('petal' + i); W.removeItem(item); G.A.chime(); D.petals++; tick(); if (D.petals === 5) finish('petals'); } });
-  }
-  if (has('lanterns')) {
-    const senaPos = G.SPOTS.sena;
-    W.sena.group.position.set(senaPos.x, G.groundAt(senaPos.x, senaPos.z) + 1.4, senaPos.z); W.sena.rebase();
-    live.push({ task: 'lanterns', p: senaPos, id: 'sena' });
-    G.addInteract('sena', senaPos, 'Talk to Sena', { onUse: () => senaScene() });
-  }
+  offered.filter(t => chosen.includes(t.id)).forEach(t => startTask(t));
+  if (day.fragment && !S.fragments.includes(n)) placeFragment(n, fragSpot(day.fragment));
 
-  // the star fragment waits on top of the pillar
-  if (!S.fragments.includes(1)) placeFragment();
-
-  // talking to Kirubel during the day
-  G.addInteract('kirubelDay', kp, 'Talk', { radius: 3, onUse: () => kirubelChat() });
-
-  function tick() {
-    const lines = [];
-    if (has('parts')) lines.push({ text: `Ship parts (${D.parts}/2)`, done: !!D.done.parts });
-    if (has('heal')) lines.push({ text: 'Heal the sapling', done: !!D.done.heal });
-    if (has('petals')) lines.push({ text: `Moonpetals (${D.petals}/5)`, done: !!D.done.petals });
-    if (has('lanterns')) lines.push({ text: D.gotLanterns ? `Hang lanterns (${D.lanterns}/3)` : 'Find Sena by your home', done: !!D.done.lanterns });
-    const all = chosen.every(id => D.done[id]);
-    if (D.sunset) UI.objective('The sun is setting — go back to Kirubel', lines);
-    else if (all) UI.objective('All done! Go tell Kirubel', lines);
-    else UI.objective('Today', lines);
-    D.lines = lines;
-    G.targets = (D.sunset || all) ? [kp] : live.filter(l => !D.done[l.task] && G.hasInteract(l.id)).map(l => l.p);
-    if (!G.targets.length) G.targets = [kp];
-  }
-  D.tick = tick; D.live = live;
-  function finish(id) { D.done[id] = true; tick(); }
+  const kInt = G.addInteract('kirubelDay', kp, 'Talk', { radius: 3, onUse: () => kirubelChat() }); D.ids.add('kirubelDay'); D.kInt = kInt;
   tick();
   UI.plannerButton(true);
-  document.getElementById('btnPlanner').onclick = () => UI.showPlan(D.lines || []);
+  document.getElementById('btnPlanner').onclick = () => UI.showPlan(D.lineList || []);
 
-  // the sun moves on its own; the day lasts ~8 minutes (longer if she skipped prayer)
-  G.dayClock = { running: true, elapsed: 0, dur: S.flags.leftEarly ? 576 : 480, from: 0.29, to: 0.74, onEnd: () => {
-    D.sunset = true; UI.toast('The sun is setting. Head back to Kirubel.', 4500); tick();
-  } };
+  const dur = (day.dayLength || 480) * (S.flags.leftEarly ? 1.2 : 1);
+  G.dayClock = { running: true, elapsed: 0, dur, from: 0.29, to: 0.74, onEnd: () => { D.sunset = true; UI.toast('The sun is setting. Head back to Kirubel.', 4500); tick(); } };
   G.follow(); G.resetCam(); G.freeze(false);
-  UI.toast(over ? 'Kristi took on too much. Her wings tire faster today.' : 'Tap ☀ to see your plan. Talk to Kirubel when you’re done.', 5000);
+  UI.toast(D.over ? 'Kristi took on too much. Her wings tire faster today.' : 'Tap ☀ to see your plan. Talk to Kirubel when you’re done.', 4500);
 
-  // wait until the day is ended through Kirubel
-  await new Promise(res => { D.endDay = res; });
-  G.dayClock.running = false;
-  ['kirubelDay', 'sena', 'sapling', 'part0', 'part1', 'post0', 'post1', 'post2', ...[0, 1, 2, 3, 4].map(i => 'petal' + i)].forEach(id => G.removeInteract(id));
-  live.forEach(l => l.item && W.removeItem(l.item));
-  if (fragItem) { W.removeItem(fragItem); fragItem = null; G.removeInteract('frag1'); }
-  UI.plannerButton(false); G.targets = []; UI.objective(null);
-}
-
-let fragItem = null;
-function placeFragment() {
-  if (fragItem || S.fragments.includes(1)) return;
-  const p = G.SPOTS.pillar, item = W.makeItem('star', p); fragItem = item;
-  G.addInteract('frag1', p, 'Take the star', { radius: 2.4, onUse: async () => {
-    G.removeInteract('frag1'); W.removeItem(item); fragItem = null; G.A.sparkle();
-    S.fragments.push(1); G.save();
-    G.freeze(true);
-    await UI.fragmentCard(1, FRAGMENT_LINES[0]);
-    G.freeze(false);
-    if (D && D.tick) D.tick();
-  } });
-}
-
-async function senaScene() {
-  if (D.busy) return; D.busy = true;
-  G.freeze(true);
-  const sp = W.sena.group.position;
-  twoShot(sp);
-  if (!D.gotLanterns) {
-    G.removeInteract('sena');
-    if (S.flags.over) await say(SE, 'You’re helping? Wait. You’re helping me AND hunting for metal AND healing a tree AND picking petals? Kristi.');
-    else await say(SE, 'You came! I thought you forgot. You always forget.');
-    await say(SE, 'Everyone is whispering about the light that fell last night. You wouldn’t know anything about that… would you?');
-    const c = await UI.choose(['No idea what you’re talking about.', '…Maybe.']);
-    if (c === 0) { await say(SE, 'Mm-hm. Your face says otherwise.'); }
-    else { await say(SE, 'KRISTI.'); await say(SE, '…Fine. Your secret is safe with me. But I want ALL the details later.'); S.flags.senaKnows = true; }
-    await say(SE, 'Here. Three lanterns. Hang them on the posts around the hollow.');
-    D.gotLanterns = true;
-    G.SPOTS.posts.forEach((p, i) => D.live.push({ task: 'lanterns', p, id: 'post' + i }));
-    G.SPOTS.posts.forEach((p, i) => G.addInteract('post' + i, p, 'Hang lantern', { onUse: () => {
-      G.removeInteract('post' + i); W.posts[i].userData.lit(); G.A.chime(); D.lanterns++; D.tick();
-      if (D.lanterns === 3) { S.flags.lanterns = true; D.done.lanterns = true; D.tick(); UI.toast('The hollow glows. Sena is delighted.'); }
-    } }));
+  // the day's story event fires part-way through the day
+  if (day.event) {
+    const poll = () => {
+      if (D.ended) return;
+      const f = G.dayClock.elapsed / G.dayClock.dur;
+      if (!D.evFired && f >= day.event.at && !D.busy && !G.P.frozen) { D.evFired = true; runEvent(day.event); }
+      requestAnimationFrame(poll);
+    };
+    poll();
   }
-  G.follow(); G.freeze(false); D.busy = false; D.tick();
+
+  await new Promise(res => { D.endDay = res; });
+  D.ended = true; G.dayClock.running = false;
+  D.ids.forEach(id => G.removeInteract(id)); D.items.forEach(it => W.removeItem(it));
+  if (D.frag) { W.removeItem(D.frag); G.removeInteract('frag'); }
+  W.warkaEyes(false); hideNPCs();
+  UI.plannerButton(false); G.targets = []; UI.objective(null); UI.holdRing(null);
+}
+
+async function runEvent(ev) {
+  D.busy = true; G.freeze(true);
+  await ev.run(ctx());
+  G.follow(); G.resetCam(); G.freeze(false); D.busy = false; tick();
+}
+
+function tick() {
+  if (!D || D.ended) return;
+  const list = D.tasks.map(t => ({ text: D.lines[t.id] || t.title, done: !!D.done[t.id] }));
+  const all = D.tasks.every(t => D.done[t.id]);
+  D.lineList = list;
+  UI.objective(D.sunset ? 'The sun is setting — go back to Kirubel' : all ? 'All done! Go tell Kirubel' : 'Today', list);
+  if (D.kInt) D.kInt.label = D.kirubelSteps.length ? D.kirubelSteps[0].step.label : 'Talk';
+  const kp = W.kirubel.group.position;
+  let tg = [];
+  if (!D.sunset && !all) D.tasks.forEach(t => { if (!D.done[t.id] && D.pend[t.id]) tg.push(...D.pend[t.id]); });
+  G.targets = tg.length ? tg : [kp];
+}
+
+function startTask(t) {
+  D.tasks.push(t);
+  (async () => {
+    for (let i = 0; i < t.steps.length; i++) {
+      if (D.ended) return;
+      await runStep(t, t.steps[i], i);
+    }
+    if (D.ended) return;
+    D.done[t.id] = true;
+    if (t.trust) S.trust += t.trust;
+    if (t.bond) S.bond += t.bond;
+    if (t.mira) S.miraKind += t.mira;
+    G.A.sparkle();
+    tick();
+  })();
+  tick();
+}
+
+function npcFor(who) {
+  if (who === 'sena') return W.sena; if (who === 'elder') return W.elder; if (who === 'mira') return W.mira;
+  if (who && who.startsWith('villager')) return W.villagers[+who.slice(8)];
+  return null;
+}
+
+function runStep(t, step, si) {
+  const id = (k) => `${t.id}_${si}_${k}`;
+  return new Promise(resolve => {
+    const setLine = (s) => { D.lines[t.id] = s; tick(); };
+    if (step.type === 'collect' || step.type === 'holds') {
+      const N = step.at.length; let got = 0; const left = new Set(step.at.map((_, i) => i));
+      const upd = () => { D.pend[t.id] = [...left].map(i => step.at[i]); setLine(step.text ? step.text(got, N) : `${t.title} (${got}/${N})`); };
+      step.at.forEach((p, i) => {
+        const item = step.noItem || step.type === 'holds' ? null : W.makeItem(step.kind, p);
+        if (item) D.items.push(item);
+        if (step.type === 'holds' && !item) { const st = W.makeItem('stack', p); D.items.push(st); step._stacks = step._stacks || []; step._stacks[i] = st; }
+        D.ids.add(id(i));
+        G.addInteract(id(i), p, step.label, { radius: step.radius || 2.6, hold: step.type === 'holds' ? step.secs : 0, onUse: () => {
+          G.removeInteract(id(i)); if (item) W.removeItem(item); G.A.chime(); got++; left.delete(i);
+          if (t.ship) { D.partsFound++; UI.toast(`Ship part ${got} of ${N}`); }
+          if (step.effect === 'lantern') W.posts[i].userData.lit();
+          if (step.effect === 'core') { S.flags.core = true; UI.toast('The star-core! Still glowing.'); }
+          if (step.type === 'holds' && step._stacks) step._stacks[i].userData.core.material.color.setHex(0x6a8a5a);
+          upd(); if (got === N) { setTimeout(tick, 0); if (step.effect === 'lantern') { S.flags.lanterns = true; UI.toast('The hollow glows. Sena is delighted.'); } delete D.pend[t.id]; resolve(); }
+        } });
+      });
+      upd();
+    } else if (step.type === 'hold') {
+      D.pend[t.id] = [step.at]; tick(); setLine(step.text ? step.text() : t.title);
+      D.ids.add(id(0));
+      G.addInteract(id(0), step.at, step.label, { hold: step.secs, radius: 3, onUse: (it) => {
+        G.A.sparkle();
+        if (step.effect === 'sapling') { healSapling(false); S.flags.healed = true; }
+        if (step.effect === 'bonfire') { W.setBonfire(1); S.flags.bonfire = Math.max(S.flags.bonfire || 0, 1); }
+        if (!it.released) { S.calm += 1; (D.reflect.patient = D.reflect.patient || []).push(t.title); UI.toast('She didn’t rush it.'); }
+        else UI.toast('It can’t be rushed… but it’s done.');
+        delete D.pend[t.id]; resolve(); setTimeout(tick, 0);
+      } });
+    } else if (step.type === 'visit') {
+      D.pend[t.id] = [step.at]; tick(); setLine(step.text ? step.text() : t.title);
+      D.ids.add(id(0));
+      G.addInteract(id(0), step.at, step.label, { onUse: () => { G.removeInteract(id(0)); G.A.chime(); delete D.pend[t.id]; resolve(); setTimeout(tick, 0); } });
+    } else if (step.type === 'talk') {
+      setLine(step.text ? step.text() : t.title);
+      if (step.who === 'kirubel') { D.kirubelSteps.push({ step, resolve }); D.pend[t.id] = [W.kirubel.group.position]; tick(); return; }
+      const npc = npcFor(step.who), p = step.at;
+      if (npc) npc.at(p.x, p.z);
+      D.pend[t.id] = [p]; tick();
+      D.ids.add(id(0));
+      G.addInteract(id(0), p, step.label, { radius: step.radius || 2.8, onUse: async () => {
+        if (D.busy) return; D.busy = true;
+        G.removeInteract(id(0)); G.freeze(true);
+        if (step.who === 'warka') {
+          W.warkaEyes(true);
+          const wp = G.SPOTS.warka, dir = V(-wp.x, 0, -wp.z).normalize();
+          G.shot(V(G.P.pos.x + dir.x * 3 + dir.z * 2, G.P.pos.y + 2.2, G.P.pos.z + dir.z * 3 - dir.x * 2), V(wp.x, G.groundAt(wp.x, wp.z) + 3.8, wp.z), 1.2);
+        } else if (npc) { npc.group.rotation.y = Math.atan2(G.P.pos.x - npc.group.position.x, G.P.pos.z - npc.group.position.z); G.faceKristi(npc.group.position); twoShot(npc.group.position); }
+        await step.scene(ctx());
+        W.warkaEyes(false);
+        G.follow(); G.freeze(false); D.busy = false; delete D.pend[t.id]; resolve(); setTimeout(tick, 0);
+      } });
+    }
+  });
+}
+
+let fragCount = 0;
+function placeFragment(n, p) {
+  const item = W.makeItem('star', p); D.frag = item;
+  G.addInteract('frag', p, 'Take the star', { radius: 2.4, y: floorAt(p.x, p.z, 99), onUse: async () => {
+    G.removeInteract('frag'); W.removeItem(item); D.frag = null; G.A.sparkle();
+    if (!S.fragments.includes(n)) S.fragments.push(n); G.save();
+    G.freeze(true); D.busy = true;
+    await UI.fragmentCard(n, FRAGMENT_LINES[n - 1]);
+    G.freeze(false); D.busy = false; tick();
+  } });
+  fragCount++;
 }
 
 async function kirubelChat() {
@@ -379,136 +454,329 @@ async function kirubelChat() {
   G.freeze(true);
   const kb = W.kirubel.group.position;
   W.kirubel.setPose('stand'); W.kirubel.group.rotation.y = Math.atan2(G.P.pos.x - kb.x, G.P.pos.z - kb.z);
-  G.faceKristi(kb);
-  twoShot();
-  const all = D.chosen.every(id => D.done[id]);
+  G.faceKristi(kb); twoShot();
+  if (D.kirubelSteps.length) {
+    const { step, resolve } = D.kirubelSteps.shift();
+    await step.scene(ctx()); resolve();
+    W.kirubel.setPose('work'); G.follow(); G.freeze(false); D.busy = false; tick(); return;
+  }
+  const ev = DAYS[D.n].event;
+  if (ev && !D.evFired) { // the day's story event always happens before the day can end
+    D.evFired = true;
+    await ev.run(ctx());
+    W.kirubel.setPose('work'); G.follow(); G.resetCam(); G.freeze(false); D.busy = false; tick(); return;
+  }
+  const all = D.tasks.every(t => D.done[t.id]);
   if (D.sunset || all) {
     await say(B, all ? 'You’re back. And you look like someone who finished something.' : 'The sun’s going down. Come sit.');
     D.busy = false; D.endDay(); return;
   }
-  const lines = ['Still working on it?', 'Lumi says you flew past three times.', 'You don’t have to do everything before sunset, you know.'];
+  const lines = ['Still working on it?', 'Lumi says you flew past three times.', 'You don’t have to do everything before sunset, you know.', 'Did you eat? Fairies eat, right?', 'One thing, then the next.'];
   await say(B, lines[Math.floor(Math.random() * lines.length)]);
   const c = await UI.choose(['Keep going', 'Call it a day']);
   if (c === 1) { await say(B, 'Then sit. The rest will still be there tomorrow.'); D.busy = false; D.endDay(); return; }
-  W.kirubel.setPose('work');
-  G.follow(); G.freeze(false); D.busy = false;
+  W.kirubel.setPose('work'); G.follow(); G.freeze(false); D.busy = false;
 }
 
-// ════════════════════ DAY 1: EVENING ════════════════════
-async function day1Evening() {
-  G.freeze(true);
+// ════════════════════ EVENING ════════════════════
+const RUSHED = ['I tried to rush the hull today. Bent a bracket. Two hours of work, undone.', 'I couldn’t sit still. I forced a panel and it cracked.', 'I worked too fast again. Something always breaks when I do.'];
+const STEADY = ['I worked slowly today. Everything I touched, held.', 'Slow and steady. The hull is starting to look like a hull.', 'Good day. Nothing broke. Not even me.'];
+
+async function stageAtCamp() {
   const kb = W.kirubel.group.position;
-  W.setTime(0.76);
   G.placePlayer(kb.x - 1.6, kb.z + 1.4); G.faceKristi(kb);
   W.kirubel.setPose('sit'); W.kirubel.group.rotation.y = Math.atan2(-1.6, 1.4);
-  twoShot();
-  const chosen = D.chosen, done = chosen.filter(id => D.done[id]), unfinished = chosen.filter(id => !D.done[id]);
-  S.steadiness += done.length - unfinished.length;
-  D.reflect = {};
+  twoShot(undefined, 30);
+}
+
+async function evening(n) {
+  const day = DAYS[n];
+  G.freeze(true);
+  W.setTime(0.76);
+  const kp = G.SPOTS.kirubel; G.place(W.kirubel, kp.x, kp.z);
+  await stageAtCamp();
+  const real = D.tasks.filter(t => !t.urgent);
+  const done = real.filter(t => D.done[t.id]).length, unfinished = real.length - done;
+  S.steadiness += done - unfinished;
+  D.reflect.done = done; D.reflect.unfinished = unfinished;
 
   // ship parts
-  if (chosen.includes('parts') && D.parts === 2) {
-    await say(B, 'You found both pieces? Kristi…');
-    await narrate('He turns the second piece over. A crack runs straight through it.', 3000);
-    await say(B, 'This one’s cracked. It won’t hold.');
-    const c = await UI.choose(['All that searching for nothing?!', 'Then that’s one less place to look tomorrow.']);
-    if (c === 0) { S.calm -= 1; D.reflect.calm = 'down'; await say(B, 'It’s not nothing. You brought it back. That’s something.'); }
-    else { S.calm += 1; D.reflect.calm = 'up'; await say(B, '…You sound like me in the morning.'); }
-  } else if (chosen.includes('parts') && D.parts === 1) {
-    await say(B, 'One piece! And it’s whole. That’s one step closer.');
-  } else {
-    await say(B, 'No ship parts today. That’s alright. The ship isn’t going anywhere. Neither am I, apparently.');
-  }
+  const shipTask = real.find(t => t.ship);
+  const cracked = shipTask && shipTask.cracked && D.partsFound === 2;
+  const gain = D.partsFound - (cracked ? 1 : 0);
+  S.ship += gain; D.reflect.parts = gain;
+  if (shipTask && D.partsFound > 0 && !cracked) await say(B, gain >= 2 ? 'Two more pieces. It’s starting to look like a ship again.' : 'One more piece. One step closer.');
+  else if (!shipTask && n < 10) await say(B, ['No ship parts today. That’s alright. The ship isn’t going anywhere. Neither am I, apparently.', 'No parts today. Lumi and I polished what we have. Very shiny.', 'No new parts. The moon won’t wait forever, but tonight it can.'][n % 3]);
 
   // his restlessness, shaped by prayer
-  if (S.restless >= 5) {
-    await say(B, 'I tried to rush the hull today. Bent a bracket. Two hours of work, undone.');
-    await narrate('He doesn’t sit still for long. He keeps getting up. He keeps pacing.', 3200);
-  } else {
-    await say(B, 'I worked slowly today. Everything I touched, held.');
-  }
+  if (S.restless >= 6) {
+    S.ship = Math.max(0, S.ship - 1); D.reflect.rushed = true;
+    await say(B, RUSHED[n % 3]);
+    await narrate('He doesn’t sit still for long. He keeps getting up. He keeps pacing.', 3000);
+  } else await say(B, STEADY[n % 3]);
 
   // her day
-  if (unfinished.length) {
-    await say(K, 'I tried to do everything. I did half of it. Badly.');
+  if (unfinished) {
+    await say(K, D.over ? 'I tried to do everything. I did half of it. Badly.' : 'I didn’t finish everything I planned.');
     const c = await UI.choose(['It’s fine. I’ll just do it all tomorrow.', 'Tomorrow I’ll pick less. And finish it.']);
     if (c === 0) { S.steadiness -= 1; D.reflect.plan = 'all'; await say(B, 'Isn’t that what you said about today?'); await say(K, '…Maybe.'); }
     else { S.steadiness += 1; D.reflect.plan = 'less'; await say(B, 'One thing. Then the next.'); await say(K, 'Don’t look so pleased with yourself.'); }
-  } else {
-    await say(K, 'I did everything I planned. Everything!');
-    await say(B, 'Then tonight, you rest. Fairy’s orders.');
-    await say(K, 'That’s MY line.');
+  } else if (done) {
+    await say(K, ['I did everything I planned. Everything!', 'Done. All of it. Without running on empty.', 'Every single thing. I’m almost proud of myself.'][n % 3]);
+    await say(B, ['Then tonight, you rest. Fairy’s orders.', 'Gold star.', 'Almost? Be proud, Kristi.'][n % 3]);
   }
 
-  // night prayer
+  if (day.evening) {
+    if (day.eveningAtFire || day.eveningAway) await UI.fade(true, 700);
+    await day.evening(ctx());
+  }
+  if (day.question !== undefined) await askQuestion(day.question);
+  W.setRepair(S.ship / SHIP_GOAL);
+}
+
+async function askQuestion(qi) {
+  const kb = W.kirubel.group.position;
+  if (Math.hypot(kb.x - G.P.pos.x, kb.z - G.P.pos.z) > 6) {
+    await UI.fade(true, 600); W.setTime(0.8);
+    const kp = G.SPOTS.kirubel; G.place(W.kirubel, kp.x, kp.z); await stageAtCamp(); await UI.fade(false, 600);
+  }
+  if (S.questions.length === 0) {
+    await say(B, 'Let’s play a game. Each night you can ask me one question. Anything.');
+    await say(B, 'But I can only answer yes, no, or… “you’ll have to find out.”');
+    await say(K, 'That’s a terrible game.');
+    await say(B, 'Seven questions. One for every night we have left before the moon gets too full to think. Choose wisely.');
+  } else await say(K, `Question number ${S.questions.length + 1}.`);
+  const opts = QUESTIONS[qi];
+  const c = await UI.choose(opts.map(o => o.q));
+  S.questions.push(qi * 10 + c);
+  for (const a of opts[c].a) await say(B, a);
+  if (S.questions.length === 7) await say(K, 'That was seven.', { sub: 'She is already thinking of an eighth.' });
+}
+
+// ════════════════════ NIGHT PRAYER ════════════════════
+async function nightPrayer(n) {
+  const day = DAYS[n];
   await UI.fade(true, 900);
-  W.setTime(0.86);
+  W.setTime(0.86); W.setStorm(n === 7 ? 0.3 : 0); hideNPCs();
   const pp = G.SPOTS.prayer;
   G.place(W.kirubel, pp.x, pp.z, pp.x + 10, pp.z); W.kirubel.setPose('stand');
   G.placePlayer(pp.x - 2.4, pp.z + 2.2); G.faceKristi(pp);
   G.shotNow(at(pp, -4.5, 1.8, 4), at(pp, 0, 1.2, 0));
   await UI.fade(false, 900);
   W.kirubel.group.rotation.y = Math.atan2(-2.4, 2.2);
-  await say(B, 'ሰላም ለኪ, Kristi.', { sub: 'Selam leki — peace be with you.' });
+  if (n === 1 || n % 3 === 0) await say(B, 'ሰላም ለኪ, Kristi.', { sub: 'Selam leki — peace be with you.' });
+  if (S.flags.word && n >= 8) await say(K, S.flags.word + ', Kirubel.', { sub: 'She says it carefully. He smiles like she gave him something.' });
   W.kirubel.group.rotation.y = Math.PI / 2; W.kirubel.setPose('pray');
   G.A.startPrayerMusic();
   G.shot(at(pp, 3.5, 1.7, 3), at(pp, 0, 1.2, 0), 0.5);
-  await UI.prayerLine('በስመ አብ ወወልድ ወመንፈስ ቅዱስ', 'In the name of the Father, the Son and the Holy Spirit.', 4800);
-  await UI.prayerLine('', 'For the parts that were found, and the ones that weren’t.', 4600);
-  await UI.prayerLine('', 'And keep her safe tonight.', 4200);
-  const c = await UI.choose(['Sit beside him until he’s done', 'Go home and get some sleep']);
-  if (c === 0) {
-    S.calm += 1; S.waited += 1; S.restless -= 2; D.reflect.night = 'stay';
-    G.placePlayer(pp.x - 1, pp.z + 1.2, Math.PI / 2);
-    await narrate('She sits in the grass beside him. The stars come out one by one, as if they were listening too.', 4200);
-  } else {
-    S.restless -= 1; D.reflect.night = 'home';
-    await narrate('From her window, she can still see the glow of his little camp.', 3400);
-  }
+  await UI.prayerLine(...[DAYS[1].morning[0][0], DAYS[1].morning[0][1]], 4600);
+  for (const [ge, en] of (day.night || [])) await UI.prayerLine(ge, typeof en === 'function' ? en(ctx()) : en, 4400);
+  const c = await prayerChoice(n, NIGHT_OPTS);
+  D.reflect.night = c;
+  if (c === 0) await narrate(['She sits in the grass beside him. The stars come out one by one, as if they were listening too.', 'She sits beside him until the last word.', 'She stays. She is getting good at staying.'][n % 3], 3800);
+  else if (c === 2) await narrate(['She kneels beside him. Two voices, one very quiet prayer.', 'Side by side, in the dark, facing east.', 'He says the words. She says the ones she knows.'][n % 3], 3800);
+  else await narrate('From her window, she can still see the glow of his little camp.', 3200);
   G.A.stopPrayerMusic();
-  S.restless = Math.max(0, S.restless);
   W.kirubel.setPose('sleep');
   G.dayClock = null;
 }
 
-// ════════════════════ END OF DAY 1 ════════════════════
-async function endOfDay1() {
-  const fresh = S.checkpoint !== 'day1_end';
-  S.checkpoint = 'day1_end'; G.save();
-  G.freeze(true);
-  W.setTime(0.9); W.kirubel.group.visible = true; W.lumi.group.visible = true;
-  const pp = G.SPOTS.prayer;
-  G.place(W.kirubel, pp.x, pp.z, pp.x + 10, pp.z); W.kirubel.setPose('sleep');
-
-  if (fresh && D) {
-    const R = D.reflect || {}, chosen = D.chosen, unf = chosen.filter(id => !D.done[id]);
-    const li = [];
-    if (!unf.length) li.push(['☀', chosen.length > SLOTS ? 'Kristi fit everything in. Barely. Her wings are exhausted.' : 'Kristi finished everything she planned.']);
-    else if (chosen.length > SLOTS) li.push(['☀', 'Kristi tried to fit everything in, and ran herself thin.']);
-    else li.push(['☀', 'Kristi left a few things unfinished.']);
-    if (R.plan === 'less') li.push(['✦', 'Tomorrow, she’ll choose more carefully.']);
-    if (R.plan === 'all') li.push(['✦', 'Tomorrow is already looking crowded.']);
-    if (R.calm === 'up') li.push(['❁', 'When the part was cracked, she stayed calm.']);
-    if (R.calm === 'down') li.push(['❁', 'The cracked part got to her. Patience is still a work in progress.']);
-    li.push(['✝', S.waited >= 2 ? 'She stayed beside him for both prayers.' : S.waited === 1 ? 'She stayed beside him for one prayer.' : 'She didn’t stay for his prayers today.']);
-    li.push(['☾', S.restless <= 3 ? 'Kirubel slept peacefully, for the first time since he fell.' : 'Kirubel was still restless. He paced long after dark.']);
-    li.push(['✦', S.fragments.includes(1) ? 'Star fragments: 1 of 10' : 'High above the forest, a star fragment is still waiting.']);
-    li.push(['○', 'The moon grows a little fuller. Nine days remain.']);
-    const pick = await UI.card(`<h2>Day 1 complete</h2><h3>How the day went</h3><ul class="reflect">${li.map(([i, t]) => `<li><i>${i}</i>${t}</li>`).join('')}</ul><p style="color:var(--muted);font-size:13px">Day 2 arrives in the next update.</p>`, ['Explore the night', 'Replay Day 1']);
-    if (pick === 1) return replay();
-  }
-  // free roam at night until Day 2 exists
-  G.placePlayer(pp.x - 3, pp.z + 3); G.follow(); G.resetCam(); G.freeze(false);
-  await UI.fade(false, 800);
-  UI.objective('Day 2 is on its way', [{ text: 'Explore the night forest', done: false }]);
-  if (!S.fragments.includes(1)) { placeFragment(); G.targets = [G.SPOTS.pillar]; UI.toast('The star on the tall rock is still glowing…', 4000); }
-  else UI.toast('Kirubel is asleep. The forest is yours tonight.', 4000);
+// ════════════════════ END OF DAY ════════════════════
+async function summary(n) {
+  const R = D.reflect, li = [];
+  if (!R.unfinished) li.push(['☀', D.over ? 'Kristi fit everything in. Barely. Her wings are exhausted.' : R.done ? 'Kristi finished everything she planned.' : 'Kristi spent the day wandering.']);
+  else if (D.over) li.push(['☀', 'Kristi tried to fit everything in, and ran herself thin.']);
+  else li.push(['☀', 'Kristi left a few things unfinished.']);
+  if (R.plan === 'less') li.push(['✦', 'Tomorrow, she’ll choose more carefully.']);
+  if (R.plan === 'all') li.push(['✦', 'Tomorrow is already looking crowded.']);
+  (R.calmUp || []).forEach(w => li.push(['❁', `When things went wrong — ${w} — she stayed calm.`]));
+  (R.calmDown || []).forEach(w => li.push(['❁', `${w[0].toUpperCase() + w.slice(1)} got to her. Patience is still a work in progress.`]));
+  if (R.spell === 'gentle') li.push(['✦', 'Her Sleep Focus Spell worked perfectly.']);
+  li.push(['✝', R.night === 1 ? 'She went home before his prayer ended tonight.' : R.night === 2 ? 'She knelt and prayed with him tonight.' : 'She stayed beside him for his prayer.']);
+  li.push(['☾', S.restless <= 3 ? 'Kirubel is at peace tonight.' : S.restless <= 6 ? 'Kirubel is restless, but holding on.' : 'Kirubel can barely sit still. The moon is getting closer.']);
+  li.push(['⚙', `Kirubel’s ship: ${Math.min(S.ship, SHIP_GOAL)} of ${SHIP_GOAL} parts${R.rushed ? ' (he rushed, and broke one)' : ''}.`]);
+  if (S.flags.coreStolen) li.push(['◈', S.flags.core ? 'The star-core is safe.' : 'The star-core is still missing.']);
+  li.push(['✦', `Star fragments: ${S.fragments.length} of 10`]);
+  li.push(['○', n === 9 ? 'Tomorrow, the moon is full.' : `The moon grows. ${10 - n} ${10 - n === 1 ? 'night remains' : 'nights remain'}.`]);
+  S.checkpoint = `d${n + 1}_morning`; S.day = n; G.save();
+  const pick = await UI.card(`<h2>Day ${n} complete</h2><h3>How the day went</h3><ul class="reflect">${li.map(([i, t]) => `<li><i>${i}</i>${t}</li>`).join('')}</ul>`, [`Continue to Day ${n + 1}`, `Replay Day ${n}`]);
+  if (pick === 1) return 'replay';
+  await UI.fade(true, 900);
+  return 'next';
 }
 
-function replay() {
-  const snap = S.snapshot;
-  if (!snap) return;
-  const copy = JSON.parse(JSON.stringify(snap)); copy.snapshot = snap; copy.checkpoint = 'day1_morning';
+function replayFrom(n) {
+  const snap = S.snaps[n]; if (!snap) return;
+  const copy = JSON.parse(JSON.stringify(snap)); copy.snaps = S.snaps; copy.checkpoint = `d${n}_morning`;
   saveState(copy);
   location.href = location.pathname + '?autostart=continue';
+}
+
+// ════════════════════ THE FULL MOON ════════════════════
+async function animate(dur, fn) { return new Promise(res => { const t0 = performance.now(); const st = () => { const k = Math.min(1, (performance.now() - t0) / dur); fn(k); if (k < 1) requestAnimationFrame(st); else res(); }; st(); }); }
+
+async function finale() {
+  G.freeze(true);
+  S.checkpoint = 'finale'; S.day = 10; G.save();
+  await UI.fade(true, 800);
+  W.setTime(0.85); W.setMoonDay(12); W.setStorm(0); W.setRepair(Math.min(1, S.ship / SHIP_GOAL));
+  const kp = G.SPOTS.kirubel, cr = G.SPOTS.crash;
+  G.place(W.kirubel, cr.x - 3.4, cr.z + 2.6, cr.x, cr.z); W.kirubel.setPose('stand');
+  G.placePlayer(cr.x - 5.4, cr.z + 4.4); G.faceKristi(W.kirubel.group.position);
+  W.sena.at(cr.x - 7, cr.z + 6.5, cr.x, cr.z);
+  const crowd = S.trust >= 3;
+  if (crowd) { W.villagers.forEach((v, i) => v.at(cr.x - 9 + i * 1.6, cr.z + 8 - i, cr.x, cr.z)); W.elder.at(cr.x - 4, cr.z + 8.5, cr.x, cr.z); }
+  if (S.miraKind >= 2) W.mira.at(cr.x - 10.5, cr.z + 5, cr.x, cr.z);
+  G.shotNow(at(cr, -16, 6, 14), at(cr, 0, 6, 0));
+  await UI.fade(false, 1500);
+  await UI.dayCard('The Full Moon', 'Night ten.');
+  await narrate('The full moon rises over the forest. It is enormous. It fills half the sky.', 3600);
+  W.skyPath(0.55); G.A.whoosh();
+  G.shot(at(cr, -14, 3, 12), at(cr, 0, 14, 0), 0.6);
+  await narrate('And above the crash site, exactly as the Elder said, the sky opens.', 3600);
+  if (crowd) await narrate('Behind them, lanterns. The Elder, the whole village. Even the fairies who were afraid came to watch.', 3800);
+  else await narrate('Sena is there, hiding behind a fern, pretending she isn’t crying already.', 3400);
+  twoShot(undefined, 1);
+  await say(B, 'Now or never.');
+  G.shot(at(cr, -9, 3.5, 7), at(cr, 0, 1.5, 0), 0.8);
+  G.A.crash(); G.shake(0.25);
+  await animate(2200, k => W.setLift(Math.sin(k * Math.PI) * 1.2));
+  W.setLift(0);
+  const reason = !S.flags.core ? 'core' : S.ship < SHIP_GOAL ? 'hull' : 'spark';
+  await narrate('The engine coughs. The light flickers. The ship drops back into the crater.', 3400);
+  twoShot(undefined, 1.2);
+  await say(B, reason === 'core' ? 'The core. Without the star-core there’s nothing to light. Kristi, there’s nothing—' : reason === 'hull' ? 'The hull — there are too many gaps. It won’t hold. Not enough parts, not enough time—' : 'It won’t catch. Something’s missing. One spark. One piece. I don’t know what!');
+  const c = await UI.choose(['NO! Not now — not after everything!', '…Breathe. One thing, then the next.']);
+  let finalCalm = c === 1 && S.calm >= CALM_GOAL;
+  if (c === 0) { S.calm -= 1; await narrate('She shouts at the ship, at the moon, at the whole sky. Nothing listens.', 3400); }
+  else if (!finalCalm) await narrate('She tries to breathe. Her hands won’t stop shaking. Ten days of patience, and it isn’t quite enough.', 3800);
+  else {
+    await narrate('She breathes. Once. Twice. And in the quiet, she hears Lumi chirp — pointing up.', 3600);
+    G.A.sparkle();
+    await W.fallingStar(at(cr, -30, 60, -40), at(G.P.pos, 0, 1.2, 0), 2.6);
+    G.A.chime();
+    await narrate('The last star fragment falls, slow as a feather, straight into her hands.', 3400);
+    if (!S.fragments.includes(10)) S.fragments.push(10);
+    await UI.fragmentCard(10, FRAGMENT_LINES[9]);
+  }
+
+  // the last prayer
+  W.kirubel.group.rotation.y = Math.PI / 2; W.kirubel.setPose('pray');
+  G.A.startPrayerMusic();
+  G.shot(at(W.kirubel.group.position, 3, 1.8, 3), at(W.kirubel.group.position, 0, 1.2, 0), 0.6);
+  await narrate('He does the only thing left to do. He turns east, and he prays.', 3400);
+  const kneelOK = S.waited >= PRAYERS_TO_KNEEL;
+  let joined = false;
+  if (kneelOK) {
+    const k = await UI.choose(['Kneel and pray with him', 'Watch from a step away']);
+    joined = k === 0;
+    if (joined) { G.placePlayer(W.kirubel.group.position.x - 1, W.kirubel.group.position.z + 1.1, Math.PI / 2); await narrate('She kneels beside him. She knows the words now. Two voices, one prayer.', 3600); await UI.prayerLine(DAYS[1].morning[0][0], DAYS[1].morning[0][1], 4200); await UI.prayerLine('', 'Amen.', 2600); }
+    else await narrate('She stays a step away and watches. It feels like the right thing. It isn’t.', 3400);
+  } else {
+    await narrate('She wants to kneel beside him. But she doesn’t know the words. She never stayed long enough to learn them.', 4200);
+  }
+  G.A.stopPrayerMusic();
+
+  const happy = finalCalm && joined && S.ship >= SHIP_GOAL && S.flags.core && S.steadiness >= STEADY_GOAL;
+  S.endingWhy = { calm: finalCalm, prayed: joined, ship: S.ship >= SHIP_GOAL, core: !!S.flags.core, steady: S.steadiness >= STEADY_GOAL };
+  if (happy) await happyEnding(crowd); else await sadEnding(crowd);
+}
+
+async function happyEnding(crowd) {
+  const cr = G.SPOTS.crash;
+  W.kirubel.setPose('stand');
+  await narrate('The star fragment in her hands begins to glow. Brighter. Brighter.', 3200);
+  G.A.sparkle(); G.shake(0.2); W.skyPath(0.95);
+  await animate(2500, k => W.setLift(k * 1.6));
+  G.shot(at(cr, -10, 3, 9), at(cr, 0, 2, 0), 0.8);
+  await narrate('The ship lifts out of the crater — and this time, it holds.', 3200);
+  twoShot(undefined, 1);
+  await say(B, 'It’s working. Kristi — it’s working!');
+  await say(B, 'The path is open. I can go home.');
+  const opts = S.flags.elderBlessing ? ['Go with him', 'Ask him to stay'] : ['Go with him'];
+  if (!S.flags.elderBlessing) await narrate('The Elder’s words echo: through the path, or the forest decides for him. Staying is not a choice the forest will allow.', 4000);
+  const c = await UI.choose(opts);
+  if (c === 0) {
+    S.ending = 'happy_go';
+    await say(B, S.flags.saidYes ? 'You said yes, under the old tree. I didn’t dare believe it.' : 'You told me I’d have to find out.');
+    await say(K, 'Now you know.');
+    await say(SE, 'You’d BETTER bring her back to visit!', { sub: 'Sena, sobbing openly.' });
+    await say(B, 'Every full moon. I promise.');
+    await narrate('She takes his hand. Her wings catch the light of the sky-path.', 3200);
+    G.shot(at(cr, -26, 8, 22), at(cr, 0, 20, 0), 0.5);
+    G.P.frozenFly = true;
+    await animate(6000, k => { const h = 1.6 + k * k * 70, gy = G.groundAt(cr.x, cr.z);
+      W.setLift(h); G.P.pos.set(cr.x - 0.8, gy + h + 1.4, cr.z + 0.8); G.P.vel.set(0, 0, 0);
+      W.kirubel.group.position.set(cr.x + 0.8, gy + h + 1.4, cr.z + 0.8); });
+    G.P.frozenFly = false;
+    await narrate('Up the path of light they go, past the treetops, past the clouds, toward the moon.', 3800);
+  } else {
+    S.ending = 'happy_stay';
+    await say(K, 'Stay. Our forest needs you here.');
+    await say(K, 'We’ll destroy your spaceship if necessary.');
+    await say(B, 'Please don’t. I just fixed it.');
+    await narrate('The engine hums. The path waits. He looks at the sky for a long time.', 3400);
+    await say(B, 'Some people show up exactly when you need them. I’m not leaving mine.');
+    await animate(2500, k => W.setLift(1.6 * (1 - k)));
+    W.skyPath(0);
+    await say(EL, 'Then the forest has one more fairy. A very tall, very strange, very blue one.');
+    await say(SE, 'I KNEW IT. I knew it from the first night!');
+    await narrate('One by one, the lanterns rise into the sky where the path used to be.', 3400);
+  }
+  G.A.startPrayerMusic();
+  const lines = FRAGMENT_LINES.map((l, i) => S.fragments.includes(i + 1) ? l : null);
+  await UI.fade(true, 1200);
+  await UI.constellation(lines, FINAL_MESSAGE, SIGNATURE);
+  G.A.stopPrayerMusic();
+  S.checkpoint = 'ending'; G.save();
+}
+
+async function sadEnding(crowd) {
+  const cr = G.SPOTS.crash;
+  W.kirubel.setPose('stand');
+  S.ending = 'sad';
+  await narrate('The path above them begins to flicker.', 2800);
+  if (crowd) await say(EL, 'The path is closing! Sky-thing, it is now or never!');
+  else await narrate('Somewhere in the dark, the forest itself begins to stir. It has made its promise. It will keep it.', 3600);
+  twoShot(undefined, 1);
+  await say(B, 'Kristi. Look at me.');
+  await say(B, 'If I don’t go now, I never will. The forest won’t let me stay.');
+  await say(K, 'But the ship —');
+  await say(B, 'The path will carry me. Maybe not gently. But it will.');
+  await say(B, 'It was worth it. All ten days. Every single one.');
+  await say(B, 'ሰላም ለኪ, Kristi.', { sub: 'Peace be with you.' });
+  G.shot(at(cr, -18, 4, 16), at(cr, 0, 10, 0), 0.6);
+  W.skyPath(0.9); G.shake(0.3); G.A.crash();
+  await animate(2000, k => W.setLift(k * 3));
+  G.A.whoosh();
+  W.wreck.visible = false; W.kirubel.group.visible = false; W.lumi.group.visible = false;
+  await W.fallingStar(at(cr, 0, 3, 0), V(-60, 160, -260), 3.4);
+  W.skyPath(0); W.setLift(0);
+  twoShot(G.SPOTS.prayer, 0.6);
+  await narrate('The light goes up, the way it came down. And then the sky is just the sky again.', 4000);
+  await narrate('Some stars only fall once.', 3400);
+  S.checkpoint = 'ending'; G.save();
+}
+
+async function endingCard() {
+  G.freeze(true);
+  const happy = (S.ending || '').startsWith('happy');
+  const why = S.endingWhy || {};
+  const missing = [];
+  if (!why.calm) missing.push('stay calm when everything breaks');
+  if (!why.prayed) missing.push('stay for more of his prayers — enough to kneel beside him at the end');
+  if (!why.ship) missing.push(`help him find more ship parts (${SHIP_GOAL} needed)`);
+  if (!why.core) missing.push('find the stolen star-core (or be kind to Mira)');
+  if (!why.steady) missing.push('finish the tasks she picks each day (choosing fewer helps)');
+  const html = happy
+    ? `<div style="text-align:center"><h2>Where the Stars Fell</h2><h3>${S.ending === 'happy_stay' ? 'He stayed.' : 'They went together.'}</h3>
+       <p>Star fragments found: ${S.fragments.length} of 10</p><p style="font-family:var(--serif);font-style:italic;font-size:20px;margin-top:14px">For Kristi.</p></div>`
+    : `<div style="text-align:center"><h2>The End</h2><h3>…but not the only one.</h3></div>
+       <p>There is another ending. To reach it, Kristi might need to:</p><ul class="reflect">${missing.map(m => `<li><i>✦</i>${m}</li>`).join('')}</ul>
+       <p>Star fragments found: ${S.fragments.length} of 10</p>`;
+  const btns = happy ? ['Play again', 'See the other choices (from Day 8)'] : ['Try again from Day 8', 'Start over'];
+  const pick = await UI.card(html, btns);
+  if ((happy && pick === 1) || (!happy && pick === 0)) return replayFrom(8);
+  try { localStorage.removeItem('wtsf.save.v1'); } catch (e) { /* ignore */ }
+  location.href = location.pathname;
 }

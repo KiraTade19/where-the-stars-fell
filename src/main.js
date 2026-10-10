@@ -92,7 +92,7 @@ document.getElementById('btnMute').addEventListener('click', (e) => { A.initAudi
 const interactables = new Map();
 let nearest = null;
 function addInteract(id, pos, label, opts = {}) {
-  const it = { id, pos, label, radius: opts.radius || 2.6, hold: opts.hold || 0, onUse: opts.onUse || null, waiters: [], progress: 0, released: false, active: true };
+  const it = { id, pos, label, y: opts.y, radius: opts.radius || 2.6, hold: opts.hold || 0, onUse: opts.onUse || null, waiters: [], progress: 0, released: false, active: true };
   interactables.set(id, it); return it;
 }
 function removeInteract(id) { interactables.delete(id); }
@@ -189,7 +189,7 @@ function update(dt) {
   W.lumi.st.target.set(lt.x + 0.9, groundAt(lt.x + 0.9, lt.z + 0.6), lt.z + 0.6);
 
   // daytime clock
-  if (G.dayClock && G.dayClock.running) {
+  if (G.dayClock && G.dayClock.running && !P.frozen) {
     const c = G.dayClock; c.elapsed += dt;
     const f = Math.min(1, c.elapsed / c.dur);
     W.setTime(c.from + (c.to - c.from) * f);
@@ -201,7 +201,7 @@ function update(dt) {
   nearest = null; let best = 1e9;
   if (!P.frozen) for (const it of interactables.values()) {
     if (!it.active) continue;
-    const d = Math.hypot(P.pos.x - it.pos.x, P.pos.z - it.pos.z) + Math.max(0, Math.abs(P.pos.y - floorAt(it.pos.x, it.pos.z, P.pos.y)) - 2);
+    const d = Math.hypot(P.pos.x - it.pos.x, P.pos.z - it.pos.z) + Math.max(0, Math.abs(P.pos.y - (it.y !== undefined ? it.y : floorAt(it.pos.x, it.pos.z, P.pos.y))) - 2);
     if (d < it.radius && d < best) { best = d; nearest = it; }
   }
   UI.actLabel(nearest ? nearest.label : null);
@@ -227,7 +227,7 @@ function update(dt) {
   } else UI.compass(null);
   UI.energy(P.energy / 100, P.energyMax < 100);
 
-  W.update(dt);
+  W.update(dt, camera);
 
   // camera
   if (cam.mode === 'follow') {
@@ -272,7 +272,7 @@ btnNew.addEventListener('click', async () => {
   }
   start(false);
 });
-if (params.get('debug')) window.__G = G;
+if (params.get('debug')) { window.__G = G; window.__UI = UI; }
 if (params.get('autostart')) start(params.get('autostart') === 'continue');
 
 // shot of the forest behind the title
