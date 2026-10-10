@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#0b0d2c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Where the Stars Fell">
+<title>Where the Stars Fell</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,700;1,500&family=Nunito:wght@400;600;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="game"></div>
+
+<!-- HUD -->
+<div id="hud" class="hidden">
+  <div id="objective"><div class="obj-title"></div><ul class="obj-list"></ul></div>
+  <div id="compass"><div class="arrow">➤</div><div class="dist"></div></div>
+  <div id="topbtns">
+    <button id="btnPlanner" class="round hidden" aria-label="Day planner">☀</button>
+    <button id="btnMute" class="round" aria-label="Sound">♪</button>
+  </div>
+  <div id="energy"><div class="fill"></div><span>wings</span></div>
+</div>
+
+<!-- touch controls -->
+<div id="controls" class="hidden">
+  <div id="joyBase"><div id="joyKnob"></div></div>
+  <button id="btnAct" class="hidden"><span class="lbl">Talk</span></button>
+  <button id="btnFly" aria-label="Fly">✦<small>fly</small></button>
+</div>
+<div id="holdRing" class="hidden"><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" class="bg"/><circle cx="50" cy="50" r="44" class="fg"/></svg><span>Hold steady…</span></div>
+
+<!-- story layers -->
+<div id="tapCatcher" class="hidden"></div>
+<div id="dialog" class="hidden">
+  <div class="name"></div>
+  <div class="text"></div>
+  <div class="sub"></div>
+  <div class="next">▾</div>
+</div>
+<div id="choices" class="hidden"></div>
+<div id="narr" class="hidden"></div>
+<div id="prayer" class="hidden"><div class="ge"></div><div class="en"></div></div>
+<div id="toast" class="hidden"></div>
+<div id="card" class="hidden"><div class="inner"></div></div>
+<div id="fade"></div>
+
+<!-- title -->
+<div id="title">
+  <div class="stars"></div>
+  <h1>Where the <em>Stars</em> Fell</h1>
+  <p class="tag">a story of a fairy, an alien, and ten nights before the full moon</p>
+  <div class="tbtns">
+    <button id="btnContinue" class="big hidden">Continue</button>
+    <button id="btnNew" class="big">Begin</button>
+  </div>
+  <p class="hint">Best with sound on · turn your phone sideways</p>
+</div>
+
+<script type="module" src="game.js"></script>
+</body>
+</html>
